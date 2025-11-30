@@ -2,13 +2,13 @@ import React, { useState, useEffect } from 'react';
 import {
   Search, Upload, MapPin, Calendar, Camera,
   CheckCircle, XCircle, Shield, User, Menu,
-  BarChart3, Eye, LogOut, ArrowRight, Phone, Mail, Lock, Loader2, Trash2
+  BarChart3, Eye, LogOut, ArrowRight, Phone, Mail, Lock, Loader2, Trash2, Home
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
 import { auth, db } from './firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { collection, addDoc, query, where, getDocs, orderBy, serverTimestamp, deleteDoc, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { collection, addDoc, query, where, getDocs, orderBy, serverTimestamp, deleteDoc, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
 
 
 // ==========================================
@@ -156,16 +156,24 @@ export default function App() {
   const [date, setDate] = useState('');
   const [time, setTime] = useState('');
 
+  // Toggle between viewing and editing profile
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+
   // Dashboard Data
   const [myItems, setMyItems] = useState([]);
 
+  // Temporary state for editing (prevents navbar from updating while typing)
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+
   // CALCULATION: How many people are waiting for ME?
   // Logic: Items I Found (i.uid === user.uid) AND Status is 'claimed_pending'
-  const pendingClaimsCount = myItems.filter(i =>
+  // ✅ FIX: Check if 'user' exists before asking for 'user.uid'
+  const pendingClaimsCount = user ? myItems.filter(i =>
     i.type === 'found' &&
     i.uid === user.uid &&
     i.status === 'claimed_pending'
-  ).length;
+  ).length : 0;
 
   // EFFECT: If the number of claims changes (new claim arrives), show badge again
   useEffect(() => {
@@ -174,36 +182,41 @@ export default function App() {
     }
   }, [pendingClaimsCount]);
 
+
   // AUTH LISTENER
-  // AUTH LISTENER (Updated to fetch User Profile)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
         setActiveView('home');
-        
+
         // 1. Fetch User's Items
         fetchMyItems(currentUser.uid);
 
-        // ✅ 2. FETCH USER PROFILE (Name & Phone)
-        // This ensures that when you claim something, we know who you are!
+        // 2. Fetch User Profile
         try {
           const userDocRef = doc(db, "users", currentUser.uid);
           const userSnap = await getDoc(userDocRef);
-          
+
           if (userSnap.exists()) {
             const userData = userSnap.data();
             setName(userData.name || "");
             setPhone(userData.phone || "");
-            // Note: We are updating the 'name' and 'phone' state variables
-            // so they are ready to be used if you claim an item.
+          } else {
+            // Important: If doc doesn't exist, clear variables so they don't keep old data
+            setName("");
+            setPhone("");
           }
         } catch (error) {
-          console.error("Error fetching user profile:", error);
+          console.error("Error fetching profile:", error);
         }
 
       } else {
+        // ✅ CLEANUP ON LOGOUT (Fixes the bug)
         setUser(null);
+        setName('');
+        setPhone('');
+        setMyItems([]);
         setActiveView('login');
       }
     });
@@ -216,18 +229,72 @@ export default function App() {
     e.preventDefault();
     setLoading(true);
     try {
-      // 1. Create Auth User
+      // 1. Create Auth User (Email/Password)
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      // 2. Save extra details (Phone, Name) to Firestore 'users' collection
-      await addDoc(collection(db, "users"), {
-        uid: userCredential.user.uid,
+      const uid = userCredential.user.uid; // Get the specific User ID
+
+      // ✅ THE FIX: Use 'setDoc' to force the Document ID to match the User UID
+      // This way, we can easily find it later using 'doc(db, "users", uid)'
+      await setDoc(doc(db, "users", uid), {
+        uid: uid,
         name: name,
         phone: phone,
-        email: email
+        email: email,
+        createdAt: serverTimestamp()
       });
+
+      // Update local state immediately so UI updates
+      setUser(userCredential.user);
+
       alert("Account Created Successfully!");
+      setActiveView('home');
     } catch (error) {
+      console.error(error);
       alert(error.message);
+    }
+    setLoading(false);
+  };
+
+  // ACTION: Update User Profile
+  const handleUpdateProfile = async (e) => {
+    e.preventDefault();
+
+    // ✅ VALIDATION 1: Check Empty Name
+    if (!editName.trim()) {
+      alert("Name cannot be empty.");
+      return;
+    }
+
+    //  Validation Logic
+    // We check 'editPhone' (the temp variable)
+    if (editPhone.length !== 10) {
+      alert("Phone number must be exactly 10 digits.");
+      return; // 🛑 THIS STOPS THE FUNCTION HERE. It won't save.
+    }
+
+    setLoading(true);
+    try {
+      // Save the TEMP data to the database
+      await setDoc(doc(db, "users", user.uid), {
+        uid: user.uid,
+        name: editName,   // Save the new name
+        phone: editPhone, // Save the new phone
+        email: user.email,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+
+      // ✅ Now update the GLOBAL state (so Navbar updates only now)
+      setName(editName);
+      setPhone(editPhone);
+
+      alert("Profile updated successfully!");
+
+      // ✅ BUG FIX 2: Stay on Profile, just exit Edit Mode
+      setIsEditingProfile(false);
+
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      alert("Failed to update profile.");
     }
     setLoading(false);
   };
@@ -243,7 +310,11 @@ export default function App() {
     setLoading(false);
   };
 
-  const handleLogout = () => signOut(auth);
+  const handleLogout = () => {
+    if (confirm("Are you sure you want to log out?")) {
+      signOut(auth);
+    }
+  };
 
   const handleImageUpload = async (e) => {
     const file = e.target.files[0];
@@ -253,26 +324,64 @@ export default function App() {
     }
   };
 
-  // ACTION: User claims an item they see in matches
+  // ACTION: User claims an item (ROBUST VERSION)
   const handleClaimItem = async (itemId) => {
     if (confirm("Send a claim request to the finder? They will see your phone number.")) {
       try {
+        // 1. Fetch the LATEST details directly from Database
+        // This ensures we get the real name/phone even if the app memory is empty
+        const userDocRef = doc(db, "users", user.uid);
+        const userSnap = await getDoc(userDocRef);
+        
+        let currentName = "Anonymous Student";
+        let currentPhone = "No Phone Provided";
+
+        if (userSnap.exists()) {
+          const userData = userSnap.data();
+          if (userData.name) currentName = userData.name;
+          if (userData.phone) currentPhone = userData.phone;
+        }
+
+        // 2. Submit the claim with the FRESH data
         const itemRef = doc(db, "items", itemId);
         await updateDoc(itemRef, {
           status: 'claimed_pending',
           claimedBy: user.uid,
-          claimantName: user.displayName || name, // Fallback to local state name
-          claimantPhone: user.phoneNumber || phone
+          claimantName: currentName,
+          claimantPhone: currentPhone
         });
-
-        // ✅ NEW LINE: Force re-fetch so the item appears in Dashboard immediately
+        
         await fetchMyItems(user.uid);
-
         alert("Claim request sent! Check your dashboard.");
         setActiveView('dashboard');
+
       } catch (error) {
         console.error("Error claiming:", error);
-        alert("Could not send claim.");
+        alert("Could not send claim. Check your connection.");
+      }
+    }
+  };
+
+  // ACTION: User cancels their own claim request
+  const handleCancelClaim = async (itemId) => {
+    if (confirm("Are you sure you want to cancel this claim request?")) {
+      try {
+        const itemRef = doc(db, "items", itemId);
+
+        // Reset the item back to 'open' state
+        await updateDoc(itemRef, {
+          status: 'open',
+          claimedBy: "",      // Clear these fields
+          claimantName: "",
+          claimantPhone: ""
+        });
+
+        await fetchMyItems(user.uid);
+        alert("Claim request cancelled.");
+
+      } catch (error) {
+        console.error("Error cancelling claim:", error);
+        alert("Error cancelling claim");
       }
     }
   };
@@ -399,14 +508,12 @@ export default function App() {
     setLoading(false);
   };
 
-  // THE "FAKE AI" LOGIC
-  // THE ROBUST MATCHING LOGIC (With Debugging)
+  // THE ROBUST MATCHING LOGIC (Fixed Status Filter)
   const findMatches = async (searchName, searchCategory, searchLocation) => {
     setLoading(true);
     console.log(`🔎 Searching for: ${searchName} | ${searchCategory} | ${searchLocation}`);
 
     try {
-      // 1. Fetch ALL found items
       const q = query(
         collection(db, "items"),
         where("type", "==", "found")
@@ -414,45 +521,43 @@ export default function App() {
 
       const querySnapshot = await getDocs(q);
       const results = [];
-
-      // Prepare search name (Handle empty case safely)
       const searchNameLower = searchName ? searchName.toLowerCase() : "";
 
       querySnapshot.forEach((doc) => {
         const data = doc.data();
+
+        // ✅ FIX: Only hide items if they are fully RETURNED.
+        // "claimed_pending" items will still show up (so others can see/claim them too)
+        if (data.status === 'returned') return;
+
+        // ✅ 2. NEW FIX: Don't show items I reported myself
+        // If the finder's ID is the same as my ID, skip it.
+        if (data.uid === user.uid) return;
+
         let score = 0;
 
-        // DEBUG: Print what we are comparing
-        // console.log(`Checking item: ${data.name} (${data.category})`);
-
-        // 1. NAME MATCH (50 Points)
+        // 1. NAME MATCH
         if (data.name && searchNameLower) {
           const foundNameLower = data.name.toLowerCase();
-
-          // Simple Check: Does one name contain the other?
-          // e.g. "Black Watch" contains "Watch"
           if (foundNameLower.includes(searchNameLower) || searchNameLower.includes(foundNameLower)) {
             score += 50;
           }
         }
 
-        // 2. CATEGORY MATCH (30 Points)
+        // 2. CATEGORY MATCH
         if (data.category === searchCategory) {
           score += 30;
         }
 
-        // 3. LOCATION MATCH (20 Points)
+        // 3. LOCATION MATCH
         if (data.location === searchLocation) {
           score += 20;
         }
 
-        // Add to results if there is ANY similarity
         if (score > 0) {
           results.push({ id: doc.id, ...data, score });
         }
       });
-
-      console.log(`✅ Found ${results.length} matches.`);
 
       // Sort: Best matches top
       results.sort((a, b) => b.score - a.score);
@@ -600,8 +705,152 @@ export default function App() {
     );
   };
 
-  // --- VIEWS ---
+  const renderProfile = () => (
+    <div className="min-h-screen flex items-center justify-center px-4 bg-slate-950 relative">
+      {/* Background Decoration */}
+      <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
+        <div className="absolute top-[-10%] right-[-10%] w-96 h-96 bg-purple-900/20 rounded-full blur-[100px]"></div>
+      </div>
 
+      <Card className="w-full max-w-md relative border border-white/10 bg-slate-900/90 backdrop-blur-xl">
+
+        {/* Header: Title + Close Button */}
+        <div className="flex justify-between items-center mb-8">
+          <h2 className="text-3xl font-bold text-white">My Profile</h2>
+          <button
+            onClick={() => {
+              setActiveView('home');
+              setIsEditingProfile(false); // Reset to view mode when closing
+            }}
+            className="text-gray-400 hover:text-white p-2 hover:bg-white/10 rounded-full transition-colors"
+          >
+            <XCircle size={28} />
+          </button>
+        </div>
+
+        {/* ==========================
+            MODE 1: VIEW DETAILS
+           ========================== */}
+        {!isEditingProfile ? (
+          <div className="text-center animate-fade-in">
+            {/* Big Avatar */}
+            <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-purple-500 to-blue-600 flex items-center justify-center mx-auto mb-4 shadow-xl shadow-purple-900/20">
+              <span className="text-4xl font-bold text-white">
+                {name ? name.charAt(0).toUpperCase() : "U"}
+              </span>
+            </div>
+
+            <h3 className="text-2xl font-bold text-white mb-8">{name || "User Name"}</h3>
+
+            {/* Info Card */}
+            <div className="bg-slate-800/50 rounded-xl p-4 text-left border border-white/5 mb-8">
+              <div className="mb-4">
+                <p className="text-xs text-gray-500 uppercase font-bold mb-1">Phone Number</p>
+                <div className="flex items-center gap-3 text-white">
+                  <Phone size={18} className="text-purple-400" />
+                  <span className="font-mono text-lg">{phone || "Not set"}</span>
+                </div>
+              </div>
+              <div className="h-px bg-white/5 my-3"></div>
+              <div>
+                <p className="text-xs text-gray-500 uppercase font-bold mb-1">Email Address</p>
+                <div className="flex items-center gap-3 text-white">
+                  <Mail size={18} className="text-blue-400" />
+                  <span className="text-sm font-medium">{user?.email}</span>
+                </div>
+              </div>
+            </div>
+
+            <Button
+              onClick={() => {
+                setEditName(name);   // Copy current name to temp
+                setEditPhone(phone); // Copy current phone to temp
+                setIsEditingProfile(true);
+              }}
+              className="w-full"
+            >
+              Edit Details
+            </Button>
+          </div>
+        ) : (
+          /* ==========================
+             MODE 2: EDIT FORM
+             ========================== */
+          <form onSubmit={(e) => { handleUpdateProfile(e); setIsEditingProfile(false); }} className="animate-fade-in">
+
+            <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl mb-6 flex items-start gap-3">
+              <User className="text-blue-400 shrink-0 mt-1" />
+              <div>
+                <p className="text-blue-200 text-sm font-bold">Editing Profile</p>
+                <p className="text-blue-300/70 text-xs mt-1">
+                  Ensure your phone number is correct so finders can reach you.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 mb-8">
+              <Input
+                label="Full Name"
+                placeholder="Your Name"
+                value={editName} // ✅ Uses temp variable
+                onChange={e => setEditName(e.target.value)}
+                icon={User}
+              />
+              <Input
+                label="Phone Number"
+                placeholder="9876543210"
+                value={editPhone} // ✅ Uses temp variable
+                onChange={(e) => {
+                  const onlyNums = e.target.value.replace(/[^0-9]/g, '');
+                  if (onlyNums.length <= 10) {
+                    setEditPhone(onlyNums);
+                  }
+                }}
+                icon={Phone}
+              />
+              {/* Email remains read-only */}
+              <div className="opacity-50 pointer-events-none">
+                <Input label="Email (Cannot change)" value={user?.email} icon={Mail} disabled={true} />
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <Button
+                variant="secondary"
+                className="flex-1"
+                onClick={handleCancelProfile} // ✅ UPDATED: Uses the revert logic
+              >
+                Cancel
+              </Button>
+              <Button type="submit" className="flex-1" disabled={loading}>
+                {loading ? <Loader2 className="animate-spin" /> : "Save Changes"}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Card>
+    </div>
+  );
+
+  // ACTION: Cancel editing and revert changes
+  const handleCancelProfile = async () => {
+    setLoading(true);
+    try {
+      // Fetch the REAL data from database to overwrite what you typed
+      const userDoc = await getDoc(doc(db, "users", user.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        setName(data.name || "");
+        setPhone(data.phone || "");
+      }
+      setIsEditingProfile(false); // Close the edit mode
+    } catch (error) {
+      console.error("Error reverting profile:", error);
+    }
+    setLoading(false);
+  };
+
+  // --- VIEWS ---
   const renderLogin = () => (
     <div className="min-h-screen flex items-center justify-center px-4 relative overflow-hidden bg-slate-950">
       <Card className="w-full max-w-md z-10">
@@ -799,9 +1048,25 @@ export default function App() {
 
   const renderMatches = () => (
     <div className="max-w-4xl mx-auto mt-10">
+      {/* HEADER WITH BACK BUTTON */}
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-3xl font-bold text-white">Matches Found</h2>
-        <Button variant="secondary" onClick={() => setActiveView('home')}>Back Home</Button>
+        <div className="flex items-center gap-4">
+
+          {/* ✅ NEW BACK BUTTON (Points to Dashboard) */}
+          <button
+            onClick={() => setActiveView('dashboard')}
+            className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors text-gray-400 hover:text-white border border-white/10"
+            title="Back to Dashboard"
+          >
+            <ArrowRight className="rotate-180" size={20} />
+          </button>
+
+          <h2 className="text-3xl font-bold text-white">Matches Found</h2>
+        </div>
+
+        <span className="bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-bold border border-green-500/30 uppercase tracking-wider">
+          Live Results
+        </span>
       </div>
 
       {matches.length === 0 ? (
@@ -812,7 +1077,27 @@ export default function App() {
         <div className="grid gap-6">
           {matches.map((item) => (
             <div key={item.id} className="bg-slate-900/80 border border-purple-500/30 rounded-2xl p-6 flex gap-6 items-center">
-              {item.image && <img src={item.image} className="w-32 h-32 object-cover rounded-xl bg-slate-800" />}
+              {/* CLICKABLE IMAGE (Opens Modal) */}
+              {/* CLICKABLE IMAGE / PLACEHOLDER (With Hover Effect) */}
+              <div
+                className="relative group cursor-pointer shrink-0"
+                onClick={() => setSelectedItem(item)}
+                title="Click to view details"
+              >
+                {/* 1. THE CONTENT (Image or Placeholder) */}
+                {item.image ? (
+                  <img src={item.image} className="w-32 h-32 object-cover rounded-xl bg-slate-800 border border-white/10 group-hover:opacity-50 transition-opacity" />
+                ) : (
+                  <div className="w-32 h-32 bg-slate-800 rounded-xl flex items-center justify-center border border-white/10 group-hover:opacity-50 transition-opacity">
+                    <Camera size={30} className="text-slate-600" />
+                  </div>
+                )}
+
+                {/* 2. THE HOVER OVERLAY (Appears on TOP of either) */}
+                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Eye className="text-white drop-shadow-lg" size={30} />
+                </div>
+              </div>
               <div className="flex-1">
                 <div className="flex justify-between">
                   <h3 className="text-2xl font-bold text-white">{item.name}</h3>
@@ -893,15 +1178,36 @@ export default function App() {
               {lostItems.length === 0 ? <p className="text-gray-600 text-center mt-10 italic">No active lost reports.</p> : (
                 lostItems.map(item => (
                   <div key={item.id} className="bg-black/20 p-4 rounded-xl flex gap-4 items-center hover:bg-black/40 transition-colors">
-                    <img src={item.image || "https://via.placeholder.com/50"} className="w-16 h-16 rounded-lg bg-slate-800 object-cover border border-white/10" />
+                    {/* IMAGE OR PLACEHOLDER */}
+                    {item.image ? (
+                      <img src={item.image} className="w-16 h-16 rounded-lg bg-slate-800 object-cover border border-white/10" />
+                    ) : (
+                      <div className="w-16 h-16 rounded-lg bg-slate-800 border border-white/10 flex items-center justify-center shrink-0">
+                        <Camera size={24} className="text-slate-600" />
+                      </div>
+                    )}
                     <div className="flex-1">
                       <p className="font-bold text-white text-lg">{item.name}</p>
                       <p className="text-sm text-gray-500">{item.location} • {new Date(item.createdAt?.seconds * 1000).toLocaleDateString()}</p>
                       <div className="mt-2"><StatusBadge status={item.status} /></div>
                     </div>
                     {/* ACTION BUTTONS */}
+                    {/* ACTION BUTTONS */}
                     <div className="flex gap-2">
-                      {/* 1. I Got It Back (Green) */}
+
+                      {/* 1. NEW: Check Matches (Purple) */}
+                      <button
+                        onClick={() => {
+                          findMatches(item.name, item.category, item.location);
+                          setActiveView('matches');
+                        }}
+                        className="p-2 text-purple-400 hover:bg-purple-500/10 rounded-lg border border-purple-500/30 transition-colors"
+                        title="Search for Matches"
+                      >
+                        <Search size={20} />
+                      </button>
+
+                      {/* 2. I Got It Back (Green) */}
                       <button
                         onClick={() => handleOwnerReceived(item.id)}
                         className="p-2 text-green-400 hover:bg-green-500/10 rounded-lg border border-green-500/30 transition-colors"
@@ -910,7 +1216,7 @@ export default function App() {
                         <CheckCircle size={20} />
                       </button>
 
-                      {/* 2. Delete (Red) */}
+                      {/* 3. Delete (Red) */}
                       <button
                         onClick={() => handleDelete(item.id)}
                         className="p-2 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
@@ -933,24 +1239,34 @@ export default function App() {
               </h3>
               <span className="bg-blue-500/20 text-blue-300 text-xs font-bold px-2 py-1 rounded-full">{foundItems.length} Active</span>
             </div>
+
             <div className="p-4 space-y-4 min-h-[200px]">
               {foundItems.length === 0 ? <p className="text-gray-600 text-center mt-10 italic">No active found reports.</p> : (
                 foundItems.map(item => (
                   <div key={item.id} className="bg-black/20 p-4 rounded-xl flex items-center justify-between gap-4 hover:bg-black/30 transition-colors border border-white/5">
-                    
+
                     {/* LEFT SIDE: Image & Text */}
                     <div className="flex items-center gap-4 flex-1 min-w-0">
-                      {/* Image */}
-                      <img src={item.image || "https://via.placeholder.com/50"} className="w-14 h-14 rounded-lg bg-slate-800 object-cover border border-white/10 shrink-0"/>
-                      
+
+                      {/* ✅ IMAGE OR PLACEHOLDER LOGIC */}
+                      <div className="shrink-0">
+                        {item.image ? (
+                          <img src={item.image} className="w-16 h-16 rounded-lg bg-slate-800 object-cover border border-white/10" />
+                        ) : (
+                          <div className="w-16 h-16 rounded-lg bg-slate-800 border border-white/10 flex items-center justify-center">
+                            <Camera size={24} className="text-slate-600" />
+                          </div>
+                        )}
+                      </div>
+
                       {/* Text Info */}
                       <div className="min-w-0">
                         <p className="font-bold text-white text-lg truncate">{item.name}</p>
                         <p className="text-sm text-gray-500 truncate">{item.location}</p>
-                        
-                        {/* ✅ THE CLEAN YELLOW BADGE (Pill Shape) */}
+
+                        {/* CLEAN YELLOW BADGE */}
                         {item.status === 'claimed_pending' && (
-                          <button 
+                          <button
                             onClick={() => setSelectedItem(item)}
                             className="mt-1.5 group flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 px-2 py-0.5 rounded-full hover:bg-yellow-500/20 transition-all w-fit cursor-pointer"
                           >
@@ -959,46 +1275,45 @@ export default function App() {
                               <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
                             </span>
                             <span className="text-[10px] font-bold text-yellow-100 uppercase tracking-wide">
-                              Claim Requested
+                              CLAIM REQUESTED
                             </span>
                           </button>
                         )}
                       </div>
                     </div>
 
-                    {/* RIGHT SIDE: Action Buttons (Horizontal Row) */}
+                    {/* RIGHT SIDE: Action Buttons */}
                     <div className="flex items-center gap-2 shrink-0">
-                       
-                       {/* 1. Main Action: Return/Confirm */}
-                       {item.status !== 'returned' && (
-                        <button 
-                          onClick={() => handleMarkReturned(item)} 
-                          className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors whitespace-nowrap shadow-lg ${
-                            item.custody === 'authority' 
-                              ? "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/20" 
-                              : "bg-green-600 hover:bg-green-500 text-white shadow-green-900/20"
-                          }`}
+
+                      {/* 1. Main Action */}
+                      {item.status !== 'returned' && (
+                        <button
+                          onClick={() => handleMarkReturned(item)}
+                          className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors whitespace-nowrap shadow-lg ${item.custody === 'authority'
+                            ? "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/20"
+                            : "bg-green-600 hover:bg-green-500 text-white shadow-green-900/20"
+                            }`}
                         >
                           {item.custody === 'authority' ? "Confirm Sub." : "Mark Returned"}
                         </button>
                       )}
 
-                      {/* 2. ✅ RESTORED EYE ICON (View Details) */}
-                      <button 
-                        onClick={() => setSelectedItem(item)} 
+                      {/* 2. Eye Icon */}
+                      <button
+                        onClick={() => setSelectedItem(item)}
                         className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
                         title="View Full Details"
                       >
-                        <Eye size={18}/>
+                        <Eye size={18} />
                       </button>
-                      
+
                       {/* 3. Trash Icon */}
-                      <button 
-                        onClick={() => handleDelete(item.id)} 
+                      <button
+                        onClick={() => handleDelete(item.id)}
                         className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
                         title="Delete Report"
                       >
-                        <Trash2 size={18}/>
+                        <Trash2 size={18} />
                       </button>
                     </div>
 
@@ -1018,14 +1333,25 @@ export default function App() {
             <div className="p-4">
               {myClaims.length === 0 ? <p className="text-gray-600 text-sm">You aren't claiming anything right now.</p> : (
                 myClaims.map(item => (
-                  <div key={item.id} className="bg-black/20 p-3 rounded-xl flex gap-3 items-center mb-3">
+                  <div key={item.id} className="bg-black/20 p-3 rounded-xl flex gap-3 items-center mb-3 border border-white/5">
+
+                    {/* INFO */}
                     <div className="flex-1">
-                      <p className="font-bold text-white">Claiming: {item.name}</p>
-                      <div className="flex items-center gap-2 mt-1 text-sm text-gray-400">
-                        <User size={14} /> Finder: {item.userEmail}
-                      </div>
-                      <div className="mt-2"><StatusBadge status={item.status} /></div>
+                      <p className="font-bold text-white text-sm">Claiming: {item.name}</p>
+                      <p className="text-xs text-gray-400">Finder Contact: {item.userEmail}</p>
+                      <div className="mt-1"><StatusBadge status={item.status} /></div>
                     </div>
+
+                    {/* CANCEL BUTTON (Only if not yet resolved) */}
+                    {item.status !== 'returned' && (
+                      <button
+                        onClick={() => handleCancelClaim(item.id)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+                        title="Withdraw Claim"
+                      >
+                        Cancel
+                      </button>
+                    )}
                   </div>
                 ))
               )}
@@ -1041,29 +1367,37 @@ export default function App() {
             </div>
             {/* CONTENT AREA */}
             <div className="p-4 space-y-4">
-               {returnedItems.length === 0 ? <p className="text-gray-600 text-center mt-4 text-sm">No resolved cases yet.</p> : (
-                 returnedItems.map(item => (
-                  <div key={item.id} className="bg-black/20 p-4 rounded-xl flex items-center gap-4 border border-white/5 opacity-75 hover:opacity-100 transition-opacity">
-                    
-                    {/* BIGGER IMAGE */}
-                    <img src={item.image || "https://via.placeholder.com/50"} className="w-14 h-14 rounded-lg bg-slate-800 object-cover grayscale opacity-60 border border-white/5"/>
-                    
+              {returnedItems.length === 0 ? <p className="text-gray-600 text-center mt-4 text-sm">No resolved cases yet.</p> : (
+                returnedItems.map(item => (
+                  <div key={item.id} className="bg-black/20 p-4 rounded-xl flex items-center gap-4 border border-white/5">
+
+                    {/* IMAGE OR PLACEHOLDER (Full Color & Bright) */}
+                    <div className="shrink-0">
+                      {item.image ? (
+                        <img src={item.image} className="w-14 h-14 rounded-lg bg-slate-800 object-cover border border-white/5" />
+                      ) : (
+                        <div className="w-14 h-14 rounded-lg bg-slate-800 border border-white/5 flex items-center justify-center shrink-0">
+                          <Camera size={20} className="text-slate-600" />
+                        </div>
+                      )}
+                    </div>
+
                     {/* TEXT CONTENT */}
                     <div className="flex-1 min-w-0">
                       <p className="font-bold text-gray-400 text-lg truncate">{item.name}</p>
-                      
+
                       <div className="flex items-center gap-2 mt-1">
                         <span className="text-xs font-bold bg-green-500/10 text-green-500 px-2 py-0.5 rounded border border-green-500/20 uppercase">
                           Returned
                         </span>
                         <span className="text-xs text-gray-600">
-                           • {new Date(item.returnedAt?.seconds * 1000).toLocaleDateString()}
+                          • {new Date(item.returnedAt?.seconds * 1000).toLocaleDateString()}
                         </span>
                       </div>
                     </div>
                   </div>
                 ))
-               )}
+              )}
             </div>
           </div>
 
@@ -1084,7 +1418,16 @@ export default function App() {
             <Search className="text-purple-500" /> {CONFIG.appName}
           </div>
           <div className="flex gap-4 items-center">
-            <span className="text-sm text-gray-400 hidden md:block">Hi, {user?.email}</span>
+
+            {/* HOME BUTTON (Matches Logout style) */}
+            <Button 
+              variant="secondary" 
+              className="py-1 px-4 text-sm" 
+              onClick={() => setActiveView('home')}
+            >
+              <Home size={14}/> Home
+            </Button>
+
             {/* DASHBOARD BUTTON */}
             <Button
               variant="secondary"
@@ -1104,6 +1447,20 @@ export default function App() {
               )}
             </Button>
             <Button variant="secondary" className="py-1 px-4 text-sm" onClick={handleLogout}><LogOut size={14} /> Logout</Button>
+
+            {/* PROFILE LINK */}
+            <button
+              onClick={() => setActiveView('profile')}
+              className="flex items-center gap-2 text-sm text-gray-300 hover:text-white hover:bg-white/10 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-white/10"
+              title="Edit Profile"
+            >
+              <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-purple-500 to-blue-500 flex items-center justify-center text-xs font-bold text-white shadow-lg">
+                {name ? name.charAt(0).toUpperCase() : "U"}
+              </div>
+              <span className="hidden md:block max-w-[100px] truncate font-medium">
+                {name || user?.email?.split('@')[0]}
+              </span>
+            </button>
           </div>
         </div>
       </nav>
@@ -1113,6 +1470,7 @@ export default function App() {
         {activeView === 'reportFound' && renderForm('found')}
         {activeView === 'matches' && renderMatches()}
         {activeView === 'dashboard' && renderDashboard()}
+        {activeView === 'profile' && renderProfile()}
       </main>
       {/* ✅ This line here make the modal sits on top of everything */}
       {renderDetailModal()}
