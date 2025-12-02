@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Search, Upload, MapPin, Calendar, Camera,
   CheckCircle, XCircle, Shield, User, Menu,
-  BarChart3, Eye, LogOut, ArrowRight, Phone, Mail, Lock, Loader2, Trash2, Home
+  BarChart3, Eye, LogOut, ArrowRight, Phone, Mail, Lock, Loader2, Trash2, Home, EyeOff
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
@@ -81,26 +81,54 @@ const Button = ({ children, onClick, variant = 'primary', className = '', type =
   );
 };
 
-const Input = ({ label, type = "text", placeholder, icon: Icon, value, onChange, required }) => (
-  <div className="mb-4">
-    <label className="block text-gray-300 text-sm font-medium mb-2">{label}</label>
-    <div className="relative">
-      {Icon && (
-        <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-          <Icon size={18} />
-        </div>
-      )}
-      <input
-        type={type}
-        placeholder={placeholder}
-        value={value}
-        onChange={onChange}
-        required={required}
-        className={`w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all ${Icon ? 'pl-10' : ''}`}
-      />
+const Input = ({ label, type = "text", placeholder, icon: Icon, value, onChange, required, disabled }) => {
+  // Local state to toggle visibility
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Decide: Should we show text or dots?
+  // If it's not a password field, just use the normal type.
+  // If it IS a password field, toggle based on state.
+  const inputType = type === 'password' ? (showPassword ? 'text' : 'password') : type;
+
+  return (
+    <div className="mb-4">
+      <label className="block text-gray-300 text-sm font-medium mb-2">{label}</label>
+      <div className="relative">
+
+        {/* LEFT ICON (Lock/User/etc) */}
+        {Icon && (
+          <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+            <Icon size={18} />
+          </div>
+        )}
+
+        <input
+          type={inputType}
+          placeholder={placeholder}
+          value={value}
+          onChange={onChange}
+          required={required}
+          disabled={disabled}
+          // Added 'pr-10' (padding-right) so text doesn't hit the eye icon
+          className={`w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all ${Icon ? 'pl-10' : ''} ${type === 'password' ? 'pr-10' : ''}`}
+        />
+
+        {/* RIGHT ICON (Show/Hide Toggle) - Only for password inputs */}
+        {type === 'password' && (
+          <button
+            type="button" // Important: Prevent form submission
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500 hover:text-white transition-colors cursor-pointer focus:outline-none"
+            tabIndex="-1" // Skip tabbing to this button for speed
+          >
+            {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
+          </button>
+        )}
+
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const Select = ({ label, options, value, onChange }) => (
   <div className="mb-4">
@@ -130,6 +158,9 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // App Loading State (Prevents flicker)
+  const [isInitializing, setIsInitializing] = useState(true);
+
   // Form States
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -147,6 +178,7 @@ export default function App() {
   const [notificationsRead, setNotificationsRead] = useState(false);
   // State for the "View Details" Modal
   const [selectedItem, setSelectedItem] = useState(null);
+  const [customLocation, setCustomLocation] = useState(''); // For manual location entry
 
   // New State for "Custody" logic
   const [custody, setCustody] = useState('me'); // Options: 'me' or 'authority'
@@ -161,6 +193,23 @@ export default function App() {
 
   // Dashboard Data
   const [myItems, setMyItems] = useState([]);
+
+  // ADMIN STATE
+  const [adminItems, setAdminItems] = useState([]);
+  const [adminStats, setAdminStats] = useState({ lost: 0, found: 0, returned: 0 });
+
+  // ✅ ADD THIS BLOCK: Auto-Recalculate Stats whenever items change
+  useEffect(() => {
+    let l = 0, f = 0, r = 0;
+
+    adminItems.forEach((item) => {
+      if (item.status === 'returned') r++;
+      else if (item.type === 'lost') l++;
+      else if (item.type === 'found') f++;
+    });
+
+    setAdminStats({ lost: l, found: f, returned: r });
+  }, [adminItems]); // <--- The dependency array: Runs every time 'adminItems' changes
 
   // Temporary state for editing (prevents navbar from updating while typing)
   const [editName, setEditName] = useState('');
@@ -182,44 +231,48 @@ export default function App() {
     }
   }, [pendingClaimsCount]);
 
-
-  // AUTH LISTENER
+  // AUTH LISTENER (Role-Based Persistence)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+
       if (currentUser) {
-        setUser(currentUser);
-        setActiveView('home');
-
-        // 1. Fetch User's Items
-        fetchMyItems(currentUser.uid);
-
-        // 2. Fetch User Profile
+        // User found! Check if they are Admin or Student
         try {
           const userDocRef = doc(db, "users", currentUser.uid);
           const userSnap = await getDoc(userDocRef);
 
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            setName(userData.name || "");
-            setPhone(userData.phone || "");
+          if (userSnap.exists() && userSnap.data().role === 'admin') {
+            // ✅ IT IS THE ADMIN
+            await fetchAdminData();
+            setActiveView('admin');
           } else {
-            // Important: If doc doesn't exist, clear variables so they don't keep old data
-            setName("");
-            setPhone("");
+            // ✅ IT IS A STUDENT
+            setUser(currentUser);
+            if (userSnap.exists()) {
+              const data = userSnap.data();
+              setName(data.name || "");
+              setPhone(data.phone || "");
+            }
+            fetchMyItems(currentUser.uid);
+
+            // Only go to home if we are currently on a login/loading screen
+            if (activeView === 'login' || activeView === 'admin' || isInitializing) {
+              setActiveView('home');
+            }
           }
         } catch (error) {
-          console.error("Error fetching profile:", error);
+          console.error("Auth check error:", error);
         }
-
       } else {
-        // ✅ CLEANUP ON LOGOUT (Fixes the bug)
+        // No user logged in
         setUser(null);
-        setName('');
-        setPhone('');
-        setMyItems([]);
+        setAdminItems([]);
         setActiveView('login');
       }
+
+      setIsInitializing(false);
     });
+
     return () => unsubscribe();
   }, []);
 
@@ -227,6 +280,13 @@ export default function App() {
 
   const handleSignup = async (e) => {
     e.preventDefault();
+
+    // ✅ VALIDATION: Check Phone Length
+    if (phone.length !== 10) {
+      alert("Phone number must be exactly 10 digits.");
+      return;
+    }
+
     setLoading(true);
     try {
       // 1. Create Auth User (Email/Password)
@@ -302,18 +362,77 @@ export default function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
+
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      // 1. Log in via Firebase Auth (Works for Admin AND Students)
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const uid = userCredential.user.uid;
+
+      // 2. Check the Database for the "Secret Badge"
+      const userDocRef = doc(db, "users", uid);
+      const userSnap = await getDoc(userDocRef);
+
+      let isAdmin = false;
+      let userData = {};
+
+      if (userSnap.exists()) {
+        userData = userSnap.data();
+        if (userData.role === 'admin') {
+          isAdmin = true;
+        }
+      }
+
+      // 3. Route them based on Role
+      if (isAdmin) {
+        console.log("Admin detected. Loading console...");
+        await fetchAdminData();
+        setActiveView('admin');
+      } else {
+        console.log("Student detected. Loading home...");
+        setUser(userCredential.user);
+        setName(userData.name || "");
+        setPhone(userData.phone || "");
+        setActiveView('home');
+      }
+
     } catch (error) {
-      alert(error.message);
+      console.error("Login Error:", error);
+      alert("Invalid Email or Password");
     }
     setLoading(false);
   };
 
   const handleLogout = () => {
     if (confirm("Are you sure you want to log out?")) {
-      signOut(auth);
+      setLoading(true);
+      signOut(auth).then(() => {
+        // Wipe local state
+        setUser(null);
+        setName('');
+        setPhone('');
+        setMyItems([]);
+        setAdminItems([]);
+
+        // ✅ NEW: Wipe the Form Inputs too!
+        setEmail('');
+        setPassword('');
+
+        setActiveView('login');
+        setLoading(false);
+      });
     }
+  };
+
+  // HELPER: Clear all form fields
+  const resetForm = () => {
+    setItemName('');
+    setCategory('');
+    setLocation('');
+    setCustomLocation('');
+    setDescription('');
+    setSelectedImage(null);
+    setDate('');
+    setTime('');
   };
 
   const handleImageUpload = async (e) => {
@@ -332,7 +451,7 @@ export default function App() {
         // This ensures we get the real name/phone even if the app memory is empty
         const userDocRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userDocRef);
-        
+
         let currentName = "Anonymous Student";
         let currentPhone = "No Phone Provided";
 
@@ -350,7 +469,7 @@ export default function App() {
           claimantName: currentName,
           claimantPhone: currentPhone
         });
-        
+
         await fetchMyItems(user.uid);
         alert("Claim request sent! Check your dashboard.");
         setActiveView('dashboard');
@@ -456,9 +575,13 @@ export default function App() {
   };
 
   const handleSubmitItem = async (type) => {
-    // 1. VALIDATION: Date is required, but Time is NOT required.
-    if (!itemName || !category || !location || !date) {
-      alert("Please fill in the required fields (Name, Category, Location, and Date).");
+    // 1. DETERMINE FINAL LOCATION
+    // If "Others" is selected, use the custom text. Otherwise use the dropdown value.
+    const finalLocation = location === 'Others' ? customLocation : location;
+
+    // 2. VALIDATION (Check finalLocation instead of just location)
+    if (!itemName || !category || !finalLocation || !date) {
+      alert("Please fill in all required fields.");
       return;
     }
     setLoading(true);
@@ -467,22 +590,25 @@ export default function App() {
       const itemData = {
         name: itemName,
         category,
-        location,
+        location: finalLocation, // ✅ SAVE THE REAL TEXT
         description,
         image: selectedImage,
         type: type,
         uid: user.uid,
         userEmail: user.email,
+
+        userName: name || "Anonymous",
+        userPhone: phone || "No Phone",
+
         status: 'open',
         createdAt: serverTimestamp(),
-
-        // ✅ SAVING THE DATA (Even if time is empty, it saves as "")
         dateLostFound: date,
         timeLostFound: time,
-
         custody: type === 'found' ? custody : 'me',
         authorityDetails: type === 'found' ? authorityDetails : ''
       };
+
+      // ... (Rest of the function remains the same: addDoc, fetchMyItems, etc.) ...
 
       // Save to Firebase
       await addDoc(collection(db, "items"), itemData);
@@ -500,7 +626,7 @@ export default function App() {
 
       // Reset Form
       setItemName(''); setCategory(''); setLocation(''); setDescription(''); setSelectedImage(null);
-      setDate(''); setTime(''); // Reset new fields
+      setDate(''); setTime(''); setCustomLocation(''); // Reset new fields
     } catch (error) {
       console.error(error);
       alert("Error saving item");
@@ -588,6 +714,42 @@ export default function App() {
       setMyItems(Array.from(combined.values()));
     } catch (error) {
       console.error("Error fetching dashboard:", error);
+    }
+  };
+
+  // ADMIN: Fetch ALL data
+  const fetchAdminData = async () => {
+    setLoading(true);
+    try {
+      // Order by newest first
+      const q = query(collection(db, "items"), orderBy("createdAt", "desc"));
+      const querySnapshot = await getDocs(q);
+      const allItems = [];
+      let l = 0, f = 0, r = 0;
+
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        allItems.push({ id: doc.id, ...data });
+
+        // Calculate Stats
+        if (data.status === 'returned') r++;
+        else if (data.type === 'lost') l++;
+        else if (data.type === 'found') f++;
+      });
+
+      setAdminItems(allItems);
+      setAdminStats({ lost: l, found: f, returned: r });
+    } catch (error) {
+      console.error("Admin Error:", error);
+    }
+    setLoading(false);
+  };
+
+  // ADMIN: Delete Action
+  const handleAdminDelete = async (id) => {
+    if (confirm("ADMIN WARNING: This will permanently delete this item. Continue?")) {
+      await deleteDoc(doc(db, "items", id));
+      setAdminItems(prev => prev.filter(item => item.id !== id));
     }
   };
 
@@ -863,8 +1025,21 @@ export default function App() {
             {loading ? <Loader2 className="animate-spin" /> : "Login"}
           </Button>
         </form>
-        <p className="mt-4 text-center text-gray-400 cursor-pointer" onClick={() => setActiveView('signup')}>
-          New here? <span className="text-purple-400 font-bold">Sign Up</span>
+        <p className="mt-6 text-center text-gray-400 text-sm">
+          Don't have an account?{' '}
+          <button
+            onClick={() => {
+              // ✅ CLEAR FIELDS BEFORE SWITCHING
+              setEmail('');
+              setPassword('');
+              setName('');
+              setPhone('');
+              setActiveView('signup');
+            }}
+            className="text-purple-400 font-bold hover:text-purple-300 hover:underline"
+          >
+            Sign Up
+          </button>
         </p>
       </Card>
     </div>
@@ -876,35 +1051,123 @@ export default function App() {
         <h1 className="text-3xl font-bold text-white text-center mb-6">Create Account</h1>
         <form onSubmit={handleSignup}>
           <Input label="Full Name" value={name} onChange={e => setName(e.target.value)} icon={User} />
-          <Input label="Phone (For matching)" value={phone} onChange={e => setPhone(e.target.value)} icon={Phone} />
+          {/* PHONE INPUT (With Restrictions) */}
+          <Input
+            label="Phone Number"
+            type="tel"
+            placeholder="9876543210"
+            icon={Phone}
+            value={phone}
+            onChange={(e) => {
+              // ✅ Logic: Only allow numbers, max 10 digits
+              const onlyNums = e.target.value.replace(/[^0-9]/g, '');
+              if (onlyNums.length <= 10) {
+                setPhone(onlyNums);
+              }
+            }}
+          />
           <Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} icon={Mail} />
           <Input label="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} icon={Lock} />
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? <Loader2 className="animate-spin" /> : "Sign Up"}
           </Button>
         </form>
-        <p className="mt-4 text-center text-gray-400 cursor-pointer" onClick={() => setActiveView('login')}>
-          Have account? <span className="text-purple-400 font-bold">Login</span>
+        <p className="mt-6 text-center text-gray-400 text-sm">
+          Already have an account?{' '}
+          <button
+            onClick={() => {
+              // ✅ CLEAR ALL FIELDS
+              setEmail('');
+              setPassword('');
+              setName('');
+              setPhone('');
+
+              // ✅ THEN SWITCH VIEW
+              setActiveView('login');
+            }}
+            className="text-purple-400 font-bold hover:text-purple-300 hover:underline cursor-pointer"
+          >
+            Login
+          </button>
         </p>
       </Card>
     </div>
   );
 
   const renderHome = () => (
-    <div className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4">
-      <h1 className="text-6xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white via-purple-200 to-indigo-200 mb-6">
-        {CONFIG.appName}
-      </h1>
-      <p className="text-xl text-gray-300 max-w-2xl mb-10">
-        AI-Powered Lost & Found System. Upload an image to find matches.
-      </p>
-      <div className="flex gap-6">
-        <Button onClick={() => setActiveView('reportLost')}>
-          <Search size={20} /> I Lost Something
-        </Button>
-        <Button variant="secondary" onClick={() => setActiveView('reportFound')}>
-          <Camera size={20} /> I Found Something
-        </Button>
+    // ✅ FIXED HEIGHT: Adjusted to account for navbar + global padding so no scrollbar appears
+    <div className="h-[calc(100vh-10rem)] flex flex-col items-center justify-center px-4 relative overflow-hidden">
+
+      {/* HERO SECTION */}
+      {/* ✅ LIFTED UP: Changed mt-[-5vh] to mt-[-15vh] */}
+      <div className="text-center z-10 mt-[-15vh]">
+        <h1 className="text-6xl md:text-7xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white via-purple-200 to-indigo-200 mb-6 drop-shadow-lg">
+          {CONFIG.appName}
+        </h1>
+        <p className="text-xl text-gray-300 max-w-2xl mx-auto mb-10 leading-relaxed">
+          AI-Powered Object Recovery System. Upload an image, and our smart algorithms will find matches instantly.
+        </p>
+
+        <div className="flex justify-center gap-6">
+          <Button
+            onClick={() => {
+              resetForm();
+              setActiveView('reportLost');
+            }}
+            className="shadow-purple-500/20 shadow-lg"
+          >
+            <Search size={20} /> I Lost Something
+          </Button>
+
+          <Button
+            variant="secondary"
+            onClick={() => {
+              resetForm();
+              setActiveView('reportFound');
+            }}
+          >
+            <Camera size={20} /> I Found Something
+          </Button>
+        </div>
+      </div>
+
+      {/* FEATURE CARDS (Anchored at Bottom) */}
+      {/* Adjusted bottom position slightly */}
+      <div className="absolute bottom-4 w-full max-w-5xl grid grid-cols-1 md:grid-cols-3 gap-6 px-4">
+
+        {/* Card 1 */}
+        <div className="bg-slate-900/40 backdrop-blur-md border border-white/5 p-5 rounded-2xl flex items-center gap-4 hover:bg-slate-800/60 transition-colors cursor-default">
+          <div className="p-3 bg-purple-500/20 rounded-xl text-purple-400">
+            <Eye size={24} />
+          </div>
+          <div>
+            <h3 className="text-white font-bold text-sm">Smart Vision AI</h3>
+            <p className="text-gray-400 text-xs mt-0.5">Automatic image recognition</p>
+          </div>
+        </div>
+
+        {/* Card 2 */}
+        <div className="bg-slate-900/40 backdrop-blur-md border border-white/5 p-5 rounded-2xl flex items-center gap-4 hover:bg-slate-800/60 transition-colors cursor-default">
+          <div className="p-3 bg-blue-500/20 rounded-xl text-blue-400">
+            <Shield size={24} />
+          </div>
+          <div>
+            <h3 className="text-white font-bold text-sm">Secure Custody</h3>
+            <p className="text-gray-400 text-xs mt-0.5">Track item handover chain</p>
+          </div>
+        </div>
+
+        {/* Card 3 */}
+        <div className="bg-slate-900/40 backdrop-blur-md border border-white/5 p-5 rounded-2xl flex items-center gap-4 hover:bg-slate-800/60 transition-colors cursor-default">
+          <div className="p-3 bg-green-500/20 rounded-xl text-green-400">
+            <Phone size={24} />
+          </div>
+          <div>
+            <h3 className="text-white font-bold text-sm">Instant Connect</h3>
+            <p className="text-gray-400 text-xs mt-0.5">Direct contact with finders</p>
+          </div>
+        </div>
+
       </div>
     </div>
   );
@@ -938,9 +1201,41 @@ export default function App() {
             onChange={e => setItemName(e.target.value)}
           />
           <Select label="Category" options={CONFIG.categories} value={category} onChange={e => setCategory(e.target.value)} />
-          <Select label="Location" options={CONFIG.locations} value={location} onChange={e => setLocation(e.target.value)} />
-          {/* DATE AND TIME SECTION */}
-          <div className="grid grid-cols-2 gap-4 mb-4">
+          {/* DYNAMIC LOCATION SELECT */}
+          <div className="mb-4">
+            <label className="block text-gray-300 text-sm font-medium mb-2">Location</label>
+            <select
+              value={location}
+              onChange={e => setLocation(e.target.value)}
+              className="w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none"
+            >
+              <option value="" disabled>Select an option</option>
+              {CONFIG.locations
+                // ✅ LOGIC: Remove 'Not Sure' if reporting a Found Item
+                .filter(loc => type === 'found' ? loc !== 'Not Sure' : true)
+                .map((opt, idx) => (
+                  <option key={idx} value={opt}>{opt}</option>
+                ))
+              }
+            </select>
+
+            {/* ✅ CONDITIONAL INPUT: Show only if 'Others' is selected */}
+            {location === 'Others' && (
+              <div className="animate-fade-in-down mt-4">
+                <Input
+                  label="Specify Location"
+                  placeholder="e.g., Mosque , Admission Cell"
+                  value={customLocation}
+                  onChange={e => setCustomLocation(e.target.value)}
+                  required
+                />
+              </div>
+            )}
+          </div>
+
+          {/* DATE AND TIME SECTION (Stable Full Width) */}
+          <div className="col-span-1 md:col-span-2 grid grid-cols-2 gap-4 mb-4">
+
             {/* 1. Date Picker */}
             <div>
               <label className="block text-gray-300 text-sm font-medium mb-2">
@@ -948,12 +1243,10 @@ export default function App() {
               </label>
               <input
                 type="date"
-                // This forces the Calendar to pop up immediately when clicked anywhere in the box
-
-                className="w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 outline-none [color-scheme:dark] cursor-pointer"
-                required
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
+                className="w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 outline-none [color-scheme:dark] cursor-pointer"
+                required
               />
             </div>
 
@@ -964,22 +1257,18 @@ export default function App() {
               </label>
               <input
                 type="time"
-                // This forces the Clock/Spinner to pop up immediately
-                onClick={(e) => e.target.showPicker()}
-                className="w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 outline-none [color-scheme:dark] cursor-pointer"
                 value={time}
                 onChange={(e) => setTime(e.target.value)}
+                className="w-full bg-slate-800/50 border border-slate-600 rounded-lg p-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 outline-none [color-scheme:dark] cursor-pointer"
               />
             </div>
 
-            {/* Helper Text */}
-            {type === 'lost' && (
-              <div className="col-span-2">
-                <p className="text-xs text-gray-500">
-                  * If unsure, please enter the probable date and time.
-                </p>
-              </div>
-            )}
+            {/* Helper Text (Now visible for BOTH Lost & Found) */}
+            <div className="col-span-2">
+              <p className="text-xs text-gray-500">
+                * If unsure, please enter the probable date and time.
+              </p>
+            </div>
           </div>
           <div className="col-span-2">
             <Input
@@ -1108,8 +1397,15 @@ export default function App() {
                   <span className="flex items-center gap-1"><MapPin size={14} /> {item.location}</span>
                   <span className="flex items-center gap-1"><User size={14} /> Reported by: {item.userEmail}</span>
                 </div>
-                {/* SMART CUSTODY LOGIC */}
-                {item.custody === 'authority' ? (
+                {/* SMART ACTION LOGIC */}
+                {item.claimedBy === user.uid ? (
+                  /* CASE 1: ALREADY CLAIMED (Green Badge) */
+                  <div className="mt-4 w-full flex items-center justify-center gap-2 text-green-400 bg-green-500/10 p-2 rounded-lg border border-green-500/20">
+                    <CheckCircle size={16} />
+                    <span className="text-xs font-bold uppercase">Already Claimed</span>
+                  </div>
+                ) : item.custody === 'authority' ? (
+                  /* CASE 2: ITEM IS AT AUTHORITY (Yellow Box) */
                   <div className="mt-4 p-3 bg-slate-800 rounded-lg border border-yellow-500/30">
                     <p className="text-yellow-400 text-xs font-bold uppercase mb-1">Item Location</p>
                     <p className="text-white text-sm">
@@ -1118,9 +1414,10 @@ export default function App() {
                     <p className="text-gray-400 text-xs mt-1">Please go there directly to collect it.</p>
                   </div>
                 ) : (
+                  /* CASE 3: STANDARD CLAIM (Just the Button) */
                   <Button
                     onClick={() => handleClaimItem(item.id)}
-                    className="mt-4 py-2 text-sm"
+                    className="mt-4 py-2 text-sm w-full"
                   >
                     Request Claim
                   </Button>
@@ -1406,9 +1703,168 @@ export default function App() {
     );
   };
 
+  const renderAdmin = () => (
+    <div className="min-h-screen bg-slate-950 p-6">
+
+      {/* Header */}
+      <div className="flex justify-between items-center mb-8 border-b border-white/10 pb-4 max-w-7xl mx-auto">
+        <div>
+          <h1 className="text-3xl font-bold text-red-500 tracking-wider">ADMIN CONSOLE</h1>
+          <p className="text-gray-400 text-xs uppercase tracking-widest">Authorized Personnel Only</p>
+        </div>
+        <button onClick={() => setActiveView('login')} className="flex items-center gap-2 text-gray-400 hover:text-white bg-white/5 px-4 py-2 rounded-lg transition-colors border border-white/10">
+          <LogOut size={18} /> Exit System
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-3 gap-6 mb-8 max-w-7xl mx-auto">
+        <div className="bg-purple-900/20 border border-purple-500/30 p-6 rounded-xl text-center">
+          <h3 className="text-purple-400 text-xs font-bold uppercase mb-2">Total Lost</h3>
+          <p className="text-4xl font-bold text-white">{adminStats.lost}</p>
+        </div>
+        <div className="bg-blue-900/20 border border-blue-500/30 p-6 rounded-xl text-center">
+          <h3 className="text-blue-400 text-xs font-bold uppercase mb-2">Total Found</h3>
+          <p className="text-4xl font-bold text-white">{adminStats.found}</p>
+        </div>
+        <div className="bg-green-900/20 border border-green-500/30 p-6 rounded-xl text-center">
+          <h3 className="text-green-400 text-xs font-bold uppercase mb-2">Resolved</h3>
+          <p className="text-4xl font-bold text-white">{adminStats.returned}</p>
+        </div>
+      </div>
+
+      {/* Master Table */}
+      <div className="bg-slate-900 border border-white/10 rounded-xl overflow-hidden shadow-2xl max-w-7xl mx-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-black/40 text-gray-500 text-xs uppercase tracking-wider">
+              <th className="p-4">Item Details</th>
+              <th className="p-4">Type</th>
+              <th className="p-4">User</th>
+              <th className="p-4">Status</th>
+              <th className="p-4 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody className="text-sm divide-y divide-white/5">
+            {adminItems.map(item => (
+              <tr key={item.id} className="hover:bg-white/5 transition-colors">
+                <td className="p-4">
+                  <div className="flex items-center gap-3">
+                    {/* Image logic stays the same */}
+                    {item.image ? (
+                      <img src={item.image} className="w-10 h-10 rounded bg-slate-800 object-cover" />
+                    ) : (
+                      <div className="w-10 h-10 rounded bg-slate-800 flex items-center justify-center text-gray-500"><Search size={16} /></div>
+                    )}
+
+                    <div>
+                      <p className="font-bold text-white">{item.name}</p>
+
+                      {/* ✅ NEW SMART DATE LOGIC */}
+                      <p className="text-xs text-gray-500">
+                        {item.location} • {
+                          item.dateLostFound
+                            ? (
+                              // ✅ FIX: Convert manual date to nice format (Slashes)
+                              new Date(item.dateLostFound).toLocaleDateString() +
+                              (item.timeLostFound ? ` at ${item.timeLostFound}` : '')
+                            )
+                            // Fallback to System Date (Slashes)
+                            : new Date(item.createdAt?.seconds * 1000).toLocaleDateString()
+                        }
+                      </p>
+                    </div>
+                  </div>
+                </td>
+                <td className="p-4">
+                  <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase border ${item.type === 'lost'
+                    ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
+                    : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                    }`}>
+                    {item.type}
+                  </span>
+                </td>
+                <td className="p-4">
+                  <div className="flex items-center gap-2 text-gray-300">
+                    <User size={16} className="text-gray-500" />
+                    <div>
+                      {/* Show Name if available, otherwise show part of Email */}
+                      <p className="font-bold text-white text-xs">
+                        {item.userName || item.userEmail.split('@')[0]}
+                      </p>
+                      <p className="text-[10px] text-gray-500">{item.userEmail}</p>
+                      {/* Show Phone only if it exists */}
+                      {item.userPhone && item.userPhone !== "No Phone" && (
+                        <p className="text-[10px] font-mono text-blue-400">{item.userPhone}</p>
+                      )}
+                    </div>
+                  </div>
+                </td>
+                <td className="p-4">
+                  {/* CASE 1: RETURNED */}
+                  {item.status === 'returned' && (
+                    <span className="text-green-400 flex items-center gap-1 text-xs font-bold">
+                      <CheckCircle size={14} /> RESOLVED
+                    </span>
+                  )}
+
+                  {/* CASE 2: CLAIM PENDING (Show Claimant Details!) */}
+                  {item.status === 'claimed_pending' && (
+                    <div>
+                      <span className="text-orange-400 flex items-center gap-1 text-xs font-bold mb-1">
+                        <Shield size={14} /> CLAIM PENDING
+                      </span>
+                      <div className="text-[10px] text-gray-400 bg-white/5 p-1.5 rounded border border-white/10">
+                        <p className="text-orange-200 font-semibold">{item.claimantName || "Unknown"}</p>
+                        <p className="font-mono">{item.claimantPhone}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* CASE 3: ACTIVE (Open) */}
+                  {item.status === 'open' && (
+                    <span className="text-blue-400 flex items-center gap-1 text-xs font-bold">
+                      <Search size={14} /> ACTIVE
+                    </span>
+                  )}
+                </td>
+                <td className="p-4 text-right">
+                  <button
+                    onClick={() => handleAdminDelete(item.id)}
+                    className="p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
+                    title="Delete Spam"
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  // --- LOADING SCREEN ---
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
+        <Loader2 className="w-12 h-12 animate-spin text-purple-500 mb-4" />
+        <p className="text-gray-400 animate-pulse">Verifying Credentials...</p>
+      </div>
+    );
+  }
+
   // --- RENDER CONTROL ---
+
+  // SAFETY GUARD: Allow 'admin' to pass even if user is null
+  if (!user && activeView !== 'signup' && activeView !== 'login' && activeView !== 'admin') {
+    return renderLogin();
+  }
+
   if (activeView === 'login') return renderLogin();
   if (activeView === 'signup') return renderSignup();
+  if (activeView === 'admin') return renderAdmin();
 
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans pb-20">
@@ -1420,12 +1876,12 @@ export default function App() {
           <div className="flex gap-4 items-center">
 
             {/* HOME BUTTON (Matches Logout style) */}
-            <Button 
-              variant="secondary" 
-              className="py-1 px-4 text-sm" 
+            <Button
+              variant="secondary"
+              className="py-1 px-4 text-sm"
               onClick={() => setActiveView('home')}
             >
-              <Home size={14}/> Home
+              <Home size={14} /> Home
             </Button>
 
             {/* DASHBOARD BUTTON */}
