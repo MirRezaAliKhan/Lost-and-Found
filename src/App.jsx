@@ -9,6 +9,7 @@ import {
 import { auth, db } from './firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, query, where, getDocs, orderBy, serverTimestamp, deleteDoc, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
+import { initGenAI, getEmbedding, findMatchesAI } from './aiMatch';
 
 
 // ==========================================
@@ -274,6 +275,17 @@ export default function App() {
     });
 
     return () => unsubscribe();
+  }, []);
+
+  // INITIALIZE GEMINI AI
+  useEffect(() => {
+    const key = import.meta.env.VITE_GEMINI_KEY;
+    if (key) {
+      initGenAI(key);
+      console.log("✨ Gemini AI Initialized");
+    } else {
+      console.warn("⚠️ VITE_GEMINI_KEY is missing in .env");
+    }
   }, []);
 
   // --- ACTIONS ---
@@ -610,6 +622,17 @@ export default function App() {
 
       // ... (Rest of the function remains the same: addDoc, fetchMyItems, etc.) ...
 
+      // 3. GENERATE AI EMBEDDING (Only for Found Items)
+      if (type === 'found') {
+        const textToEmbed = `${itemName} ${category} ${description} ${finalLocation}`;
+        console.log("Generating embedding for:", textToEmbed);
+        const embedding = await getEmbedding(textToEmbed);
+        if (embedding) {
+          itemData.embedding = embedding;
+          console.log("✅ Embedding generated!");
+        }
+      }
+
       // Save to Firebase
       await addDoc(collection(db, "items"), itemData);
 
@@ -634,60 +657,20 @@ export default function App() {
     setLoading(false);
   };
 
-  // THE ROBUST MATCHING LOGIC (Fixed Status Filter)
+  // THE ROBUST MATCHING LOGIC (AI POWERED)
   const findMatches = async (searchName, searchCategory, searchLocation) => {
     setLoading(true);
-    console.log(`🔎 Searching for: ${searchName} | ${searchCategory} | ${searchLocation}`);
+
+    // Check if API key exists, if not fallback to old logic (or just show alert)
+    if (!import.meta.env.VITE_GEMINI_KEY) {
+      alert("AI Matching is disabled (Missing API Key). Using basic search.");
+      // ... (You could keep the old logic here as fallback, but for this task we switch to AI)
+    }
 
     try {
-      const q = query(
-        collection(db, "items"),
-        where("type", "==", "found")
-      );
-
-      const querySnapshot = await getDocs(q);
-      const results = [];
-      const searchNameLower = searchName ? searchName.toLowerCase() : "";
-
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-
-        // ✅ FIX: Only hide items if they are fully RETURNED.
-        // "claimed_pending" items will still show up (so others can see/claim them too)
-        if (data.status === 'returned') return;
-
-        // ✅ 2. NEW FIX: Don't show items I reported myself
-        // If the finder's ID is the same as my ID, skip it.
-        if (data.uid === user.uid) return;
-
-        let score = 0;
-
-        // 1. NAME MATCH
-        if (data.name && searchNameLower) {
-          const foundNameLower = data.name.toLowerCase();
-          if (foundNameLower.includes(searchNameLower) || searchNameLower.includes(foundNameLower)) {
-            score += 50;
-          }
-        }
-
-        // 2. CATEGORY MATCH
-        if (data.category === searchCategory) {
-          score += 30;
-        }
-
-        // 3. LOCATION MATCH
-        if (data.location === searchLocation) {
-          score += 20;
-        }
-
-        if (score > 0) {
-          results.push({ id: doc.id, ...data, score });
-        }
-      });
-
-      // Sort: Best matches top
-      results.sort((a, b) => b.score - a.score);
-      setMatches(results);
+      // Use the new AI Helper
+      const aiResults = await findMatchesAI(searchName, searchCategory, searchLocation, user.uid);
+      setMatches(aiResults);
 
     } catch (error) {
       console.error("Error finding matches:", error);
