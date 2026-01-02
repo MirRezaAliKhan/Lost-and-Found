@@ -16,7 +16,7 @@ import { initGenAI, getEmbedding, findMatchesAI } from './aiMatch';
 // 1. CONFIGURATION
 // ==========================================
 const CONFIG = {
-  appName: "LostFound.AI",
+  appName: "Lost-N-Found",
   tagline: "AI-Powered Object Recovery System",
   categories: ["Electronics", "Clothing", "ID/Docs", "Accessories", "Books", "Keys", "Other"],
   locations: ["Canteen", "Library", "Parking Lot", "Seminar Hall", "Sports Complex", "Classroom", "Others", "Not Sure"
@@ -445,6 +445,8 @@ export default function App() {
     setSelectedImage(null);
     setDate('');
     setTime('');
+    setAuthorityDetails(''); // ✅ Add this
+    setCustody('me');        // ✅ Add this
   };
 
   const handleImageUpload = async (e) => {
@@ -521,6 +523,8 @@ export default function App() {
   // ACTION: Close the case (Either returned to owner OR submitted to staff)
   const handleMarkReturned = async (item) => {
     let details = "";
+    // ✅ 1. Default status is 'returned'
+    let newStatus = 'returned'; 
 
     // CASE 1: You said earlier that you gave it to Authority (Library/Guard)
     if (item.custody === 'authority') {
@@ -528,7 +532,9 @@ export default function App() {
         return;
       }
       details = `Submitted to: ${item.authorityDetails}`;
-    }
+      // ✅ 2. Change status to 'submitted' for authority cases
+      newStatus = 'submitted'; 
+    } 
     // CASE 2: You had it with you, now you are returning it
     else {
       const input = prompt("To whom did you return this item? (e.g., 'Owner', 'Security Guard')");
@@ -539,13 +545,14 @@ export default function App() {
     try {
       const itemRef = doc(db, "items", item.id);
       await updateDoc(itemRef, {
-        status: 'returned', // We still call it 'returned' to move it to History
+        // ✅ 3. USE THE VARIABLE (Not hardcoded 'returned')
+        status: newStatus, 
         returnedAt: serverTimestamp(),
-        handoverDetails: details
+        handoverDetails: details 
       });
-
+      
       await fetchMyItems(user.uid);
-      alert("Report closed successfully!");
+      alert("Report updated successfully!");
 
     } catch (error) {
       console.error("Error updating status:", error);
@@ -650,6 +657,9 @@ export default function App() {
       // Reset Form
       setItemName(''); setCategory(''); setLocation(''); setDescription(''); setSelectedImage(null);
       setDate(''); setTime(''); setCustomLocation(''); // Reset new fields
+      // ✅ ADD THESE TWO LINES TO FIX THE BUG
+      setAuthorityDetails(''); 
+      setCustody('me'); // Reset radio button to default
     } catch (error) {
       console.error(error);
       alert("Error saving item");
@@ -1124,8 +1134,8 @@ export default function App() {
             <Eye size={24} />
           </div>
           <div>
-            <h3 className="text-white font-bold text-sm">Smart Vision AI</h3>
-            <p className="text-gray-400 text-xs mt-0.5">Automatic image recognition</p>
+            <h3 className="text-white font-bold text-sm">Smart AI</h3>
+            <p className="text-gray-400 text-xs mt-0.5">Automatic text recognition</p>
           </div>
         </div>
 
@@ -1415,26 +1425,33 @@ export default function App() {
 
   // THE IMPROVED DASHBOARD (Better Styling)
   const renderDashboard = () => {
-    // Filters (Same logic as before)
+    // FILTERS UPDATE:
+    // 1. Lost Items: Keep showing until I get them back ('returned')
     const lostItems = myItems.filter(i => i.type === 'lost' && i.uid === user.uid && i.status !== 'returned');
-    const foundItems = myItems.filter(i => i.type === 'found' && i.uid === user.uid && i.status !== 'returned');
-    const returnedItems = myItems.filter(i => i.uid === user.uid && i.status === 'returned');
+    
+    // 2. Found Items: Show only if I still have them. 
+    // If 'returned' OR 'submitted', they move to history.
+    const foundItems = myItems.filter(i => i.type === 'found' && i.uid === user.uid && i.status !== 'returned' && i.status !== 'submitted');
+    
+    // 3. History: Show items that are 'returned' OR 'submitted'
+    const returnedItems = myItems.filter(i => i.uid === user.uid && (i.status === 'returned' || i.status === 'submitted'));
+    
     const myClaims = myItems.filter(i => i.claimedBy === user.uid);
 
-    // Helper: Status Badge (Same as before)
+    // Helper: Status Badge (Updated for 'submitted')
     const StatusBadge = ({ status }) => {
       const styles = {
         open: "bg-blue-500/10 text-blue-400 border-blue-500/50",
         claimed_pending: "bg-yellow-500/10 text-yellow-400 border-yellow-500/50",
         returned: "bg-green-500/10 text-green-400 border-green-500/50",
+        submitted: "bg-purple-500/10 text-purple-400 border-purple-500/50", // ✅ New Badge Style
       };
       return (
         <span className={`text-[10px] uppercase font-bold px-2 py-1 rounded border ${styles[status] || styles.open}`}>
-          {status === 'returned' ? 'Resolved' : status.replace('_', ' ')}
+          {status === 'returned' ? 'Resolved' : status === 'submitted' ? 'Submitted' : status.replace('_', ' ')}
         </span>
       );
     };
-
     return (
       <div className="max-w-7xl mx-auto mt-8 pb-20 px-4">
 

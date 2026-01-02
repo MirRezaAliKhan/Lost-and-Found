@@ -33,7 +33,7 @@ export const getEmbedding = async (text) => {
 // Compute Cosine Similarity between two vectors
 const cosineSimilarity = (vecA, vecB) => {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
-  
+
   let dotProduct = 0;
   let magnitudeA = 0;
   let magnitudeB = 0;
@@ -48,7 +48,7 @@ const cosineSimilarity = (vecA, vecB) => {
   magnitudeB = Math.sqrt(magnitudeB);
 
   if (magnitudeA === 0 || magnitudeB === 0) return 0;
-  
+
   return dotProduct / (magnitudeA * magnitudeB);
 };
 
@@ -77,7 +77,8 @@ export const findMatchesAI = async (searchText, searchCategory, searchLocation, 
     const q = query(
       collection(db, "items"),
       where("type", "==", "found"),
-      where("status", "in", ["open", "claimed_pending"]) // Include pending claims so people can still see them
+      // ✅ FIX: Include 'submitted' so items at the security guard are still searchable
+      where("status", "in", ["open", "claimed_pending", "submitted"]) // Include pending claims so people can still see them
     );
 
     const querySnapshot = await getDocs(q);
@@ -94,7 +95,7 @@ export const findMatchesAI = async (searchText, searchCategory, searchLocation, 
       // A. If the item has a pre-computed embedding, use it
       if (data.embedding) {
         similarity = cosineSimilarity(queryEmbedding, data.embedding);
-      } 
+      }
       // B. Fallback: If no embedding (legacy item), use basic text overlap score
       else {
         // Simple keyword match fallback
@@ -105,15 +106,15 @@ export const findMatchesAI = async (searchText, searchCategory, searchLocation, 
           if (itemText.includes(term)) matchCount++;
         });
         // Normalize somewhat (arbitrary fallback score)
-        similarity = matchCount > 0 ? 0.3 + (matchCount * 0.1) : 0; 
+        similarity = matchCount > 0 ? 0.3 + (matchCount * 0.1) : 0;
       }
 
       // Convert similarity (0-1) to percentage score (0-100)
       // We can boost the score if Category matches exactly
       if (data.category === searchCategory) {
-        similarity += 0.1; 
+        similarity += 0.1;
       }
-      
+
       // Boost if Location matches exactly
       if (data.location === searchLocation) {
         similarity += 0.05;
