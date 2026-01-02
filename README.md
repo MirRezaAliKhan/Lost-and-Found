@@ -50,8 +50,8 @@
 
 ## 👥 Contributors
 
-**Mir Reza Ali Khan**
-**Mohammed Zaheer Khan**
+**Mir Reza Ali Khan** ,
+**Mohammed Zaheer Khan** ,
 **Hasifa Ammara**
 
 ---
