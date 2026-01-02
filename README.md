@@ -50,9 +50,9 @@
 
 ## 👥 Contributors
 
-Mir Reza Ali Khan
-Mohammed Zaheer Khan
-Hasifa Ammara
+**Mir Reza Ali Khan**
+**Mohammed Zaheer Khan**
+**Hasifa Ammara**
 
 ---
 *Developed for the CSI-MJCET's Mini Expo 2025.*
